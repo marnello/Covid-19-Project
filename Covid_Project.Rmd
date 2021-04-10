@@ -1,0 +1,596 @@
+---
+title: "Covid-19 County Statistics"
+author: "Orla Marnell"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, messages = FALSE, message=FALSE, warning=FALSE)
+library(GADMTools)
+library(ggplot2)
+library(gridExtra)
+library(leaflet)
+library(patchwork)
+library(plotly)
+library(scales)
+library(tidyverse)
+library(tmap)
+library(tmaptools)
+```
+
+## {.tabset}
+```{r}
+#Data Input
+d <- read_csv('http://opendata-geohive.hub.arcgis.com/datasets/d9be85b30d7748b5b7c09450b8aede63_0.csv')
+```
+
+```{r}
+#Putting both ID variables as factors
+d$OBJECTID <- as.factor(d$OBJECTID)
+d$ORIGID <- as.factor(d$ORIGID)
+```
+
+```{r}
+#Remove ConfirmedCovidDeaths and ConfirmedCovidRecovery
+d <- d[,-c(13:14)]
+```
+
+```{r}
+#Change the timestamp data
+d$TimeStamp <-  as.Date(strptime(d$TimeStamp, tz = "GMT", "%Y/%m/%d %H:%M:%S"))
+```
+
+```{r}
+# Filter dates to before project submission
+dateFinal <- as.Date("2020/12/12")
+d %>%
+  filter(TimeStamp <= dateFinal) ->
+  d
+```
+
+```{r}
+#Remove NA's from Population Proportion Cases
+d$PopulationProportionCovidCases <- replace_na(d$PopulationProportionCovidCases, 0)
+```
+
+```{r}
+#Covid-19 14-day incidence rates per 100,000 population calculation
+#Calculated for each county on each day by taking the Population Proportion Covid Cases (cases per 100,000 population) and subtracting the values from the same county 14 days previously.
+d$IncidenceRate <- 0
+len <- nrow(d)
+    for(i in 365:len){
+     d$IncidenceRate[i] <- (d$PopulationProportionCovidCases[i] - d$PopulationProportionCovidCases[i-(26*14)])
+    }
+```
+
+```{r}
+#Daily Confirmed Covid Cases
+d$DailyConfirmedCovidCases <- 0
+len <- nrow(d)
+    for(i in 27:len){
+     d$DailyConfirmedCovidCases[i] <- (d$ConfirmedCovidCases[i] - d$ConfirmedCovidCases[i-(26)])
+    }
+```
+
+```{r}
+#Daily Population Proportion Covid Cases
+d$DailyPopulationProportionCovidCases <- 0
+len <- nrow(d)
+    for(i in 27:len){
+     d$DailyPopulationProportionCovidCases[i] <- (d$PopulationProportionCovidCases[i] - d$PopulationProportionCovidCases[i-(26)])
+    }
+```
+
+```{r}
+#Spatial polygons data frame upload for maps
+ire <- gadm_sp_loadCountries("IRL", basefile = "./", level=1)$sp #need to remove comment if using for the first time
+save(ire, file="ire.Rdata") #need to remove comment if using for the first time
+load("ire.Rdata")
+names(ire)[4]<- "CountyName" #renaming the county name column to match the main dataset
+```
+
+```{r}
+#OVERVIEW---------------------------------------------------------------------------------------------------
+```
+
+### Overview Dashboard
+
+```{r}
+dd <- subset(d, TimeStamp == "2020-12-04")
+County <- reorder(dd$CountyName, dd$ConfirmedCovidCases)
+
+t<- ggplot(dd, aes(x=County, y=ConfirmedCovidCases)) +
+geom_bar(col="black",fill="black",stat = "identity", width=0.7) +
+coord_flip() + labs(x="County", y="Confirmed Covid Cases")+
+theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+```
+
+```{r}
+total <- d%>% group_by (TimeStamp)%>%
+summarise(TotalCases = sum(ConfirmedCovidCases),
+          .groups = 'drop')
+p <- ggplot(data=total, aes(x=TimeStamp, y=TotalCases)) + 
+  geom_line()+
+theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+pp <- p+ scale_x_date(breaks = "1 month",labels=date_format("%b"))
+```
+
+```{r,fig.width=10, fig.height=4}
+x <- subplot(t, pp, margin = 0.04)
+
+x %>% layout(annotations = list(
+ list(x = 0.1 , y = 1.1, text = "Confirmed Covid Cases by County", showarrow = F, xref='paper', yref='paper'),
+  list(x = 0.9 , y = 1.1, text = "Total Confirmed Covid Cases", showarrow = F, xref='paper', yref='paper')))
+
+```
+
+```{r}
+d %>%
+  filter(TimeStamp == as.Date("2020/12/04")) %>%
+  group_by(CountyName) ->
+  AllCountiesDec04
+
+maximumP <- max(AllCountiesDec04$PopulationProportionCovidCases)
+minimumP <- min(AllCountiesDec04$PopulationProportionCovidCases)
+County <- reorder(AllCountiesDec04$CountyName, AllCountiesDec04$PopulationProportionCovidCases)
+
+p4 <- ggplot(data = AllCountiesDec04) +
+  geom_point(mapping = aes(x=PopulationProportionCovidCases,
+                           y = County, 
+                           color = CountyName))+
+  theme(legend.title = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        legend.position = "none")+
+  labs(title = "")+
+  geom_vline(xintercept= maximumP, 
+             color="red") +
+  geom_vline(xintercept= minimumP, 
+             color="green")
+
+```
+
+```{r}
+f <- ggplot(d, aes(x=TimeStamp, y=IncidenceRate))+
+  geom_line()+
+  facet_wrap(~CountyName)+
+  xlab(NULL)+
+  labs(title = "")+
+  theme(axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        panel.spacing.y = unit(1, "mm"))
+#+  ylab("14-Day Incidence Rate")+scale_x_date(breaks = "6 month",labels=date_format("%b"))
+```
+
+```{r,fig.width=10, fig.height=5}
+y <- subplot(p4, f, widths = c(0.4,0.6), margin = 0.04)
+y %>% layout(annotations = list(
+ list(x = 0.05 , y = 1.1, text = "Covid Cases per 100,000", showarrow = F, xref='paper', yref='paper'),
+  list(x = 0.97 , y = 0, text = "14-day Incidence Rates by County", showarrow = F, xref='paper', yref='paper')))
+
+```
+This dashboard was created so anyone looking at the file would be able to get a quick understanding of what was going on at a country level, as well as seeing how counties were performing in terms of confirmed cases per county, cases per 100,000, and 14-day incidence rates.  
+  
+In order to calculate the 14-day incidence rates, daily confirmed Covid cases, and daily population proportion Covid cases, I wrote individual for loops to calculate each (see .rmd file).
+
+### Maps
+
+```{r}
+#Filter data at start of country-wide lockdown
+dateStart <- as.Date("2020/10/21")
+d %>%
+  filter(TimeStamp == dateStart) %>%
+  group_by(CountyName) ->
+  fullCountyLockdownStart
+```
+
+```{r}
+#Filter data one month after country-wide lockdown
+dateFinal <- as.Date("2020/12/02")
+d %>%
+  filter(TimeStamp == dateFinal) %>%
+  group_by(CountyName) ->
+  fullCountyLockdownEnd
+```
+
+```{r}
+ire$IncidenceRateStart <- fullCountyLockdownStart$IncidenceRate
+ire$IncidenceRateEnd <- fullCountyLockdownEnd$IncidenceRate
+```
+<font size="5"> **Incidence rates before and after countrywide lockdown Oct-Dec** </font>
+```{r,fig.width=12, fig.height=4}
+tmap_mode("view")
+tmap_style("albatross")
+tm_shape(ire) +
+  tm_text("CountyName", size = 0.7) +
+    tm_polygons(c("IncidenceRateStart", "IncidenceRateEnd")) +
+  tm_layout(legend.outside = TRUE) +
+    tm_facets(sync = TRUE, ncol = 2, free.scales = FALSE)
+```
+During the project, there was a country-wide lockdown, as incidence rates were significantly increasing in most counties across Ireland. To illustrate the effectiveness of Level 5 lockdowns, where inter-county travel is not permitted, I created an interactive map that shows the incidence rates before and after the country-wide lockdown.  
+  
+- **Lockdown start:** 21st October 2020  
+- **Lockdown end:** 2nd December 2020  
+  
+From the maps we can clearly see that the lockdown has had a significant effect across the country, in particular in County Cavan, which had the highest incidence rates per 100,000 in the country.
+
+### Local Lockdowns {.tabset}
+**Are local lockdowns effective at decreasing the 14-day incidence rates of Covid-19?**
+  
+During 2020, there were 7 different counties that had local lockdowns introduced, as the incidence rates in these counties were significantly higher than in other regions. These counties can be divided into groups as follows:
+
+- **Midlands:** Kildare, Laois, Offaly
+- **Dublin**
+- **Border counties:** Donegal, Cavan, Monaghan 
+
+
+**Hypothesis Test**  
+**$H_0 =$** local lockdowns do not have an effect on the incidence rate  
+**$H_a =$**  the incidence rate decreases after the local lockdown is introduced
+
+**Conclusion**  
+The results of the hypothesis tests for all counties confirm that we should reject the null hypothesis in favour of the alternative - the incidence rate decreases after the local lockdown is introduced. From the plots we can see that the local lockdowns have been most effective in the Midlands. In Dublin and the border counties, local lockdowns have managed to slow down the increase in incidence rate, but country-wide lockdowns were needed to have a singificant effect.
+
+**Plots**  
+Incidence rates by county vs. date with markers for lockdown starts/ends  
+- <span style="color: red;">**Red**</span> start/end of local lockdown  
+- <span style="color: magenta;">**Magenta**</span> start Level 3 lockdown  
+- <span style="color: cyan;">**Cyan**</span> start Level 4 lockdown  
+- <span style="color: blue;">**Blue**</span> start/end of country-wide lockdown
+
+```{r}
+### The Midlands 
+#**Kildare** 2020/08/07-2020/08/31  
+d %>%
+  filter(CountyName=="Kildare") %>%
+  group_by(TimeStamp) ->
+  kildare
+
+kildareplot <- ggplot(kildare, aes(x=TimeStamp, y=IncidenceRate))+
+  geom_line()+
+  geom_vline(xintercept = as.Date(c("2020/08/07","2020/08/31")),
+             col = "red", lwd = 1)+
+    geom_vline(xintercept = as.Date(c("2020/10/21", "2020/12/02")),
+             col = "blue", lwd = 1)+
+  xlab(NULL)+
+  ggtitle("Kildare")
+```
+
+```{r}
+#**Laois** 2020/08/07-2020/08/21  
+d %>%
+  filter(CountyName=="Laois") %>%
+  group_by(TimeStamp) ->
+  laois
+
+laoisplot <- ggplot(laois, aes(x=TimeStamp, y=IncidenceRate))+
+  geom_line()+
+  geom_vline(xintercept = as.Date(c("2020/08/07","2020/08/21")),
+             col = "red", lwd = 1)+
+    geom_vline(xintercept = as.Date(c("2020/10/21", "2020/12/02")),
+             col = "blue", lwd = 1)+
+  xlab(NULL)+
+  ggtitle("Laois")
+```
+
+```{r}
+#**Offaly** 2020/08/07-2020/08/21  
+d %>%
+  filter(CountyName=="Offaly") %>%
+  group_by(TimeStamp) ->
+  offaly
+
+offalyplot <- ggplot(offaly, aes(x=TimeStamp, y=IncidenceRate))+
+  geom_line()+
+  geom_vline(xintercept = as.Date(c("2020/08/07","2020/08/21")),
+             col = "red", lwd = 1)+
+  geom_vline(xintercept = as.Date(c("2020/10/21", "2020/12/02")),
+             col = "blue", lwd = 1)+
+  xlab(NULL)+
+  ggtitle("Offaly")
+```
+
+```{r}
+#Dublin
+#Level 3: 2020/09/19  
+#Country Lockdown: 2020/10/21  
+d %>%
+  filter(CountyName=="Dublin") %>%
+  group_by(TimeStamp) ->
+  dublin
+
+dublinplot <- ggplot(dublin, aes(x=TimeStamp, y=IncidenceRate))+
+  geom_line()+
+  geom_vline(xintercept = as.Date("2020/09/19"),
+             col = "magenta", lwd = 1)+
+    geom_vline(xintercept = as.Date(c("2020/10/21", "2020/12/02")),
+             col = "blue", lwd = 1, show.legend = TRUE)+
+  xlab(NULL)+
+  ggtitle("Dublin")
+```
+
+```{r}
+#Border Counties
+#**Donegal**  
+#Level 3: 2020/09/25  
+#Level 4: 2020/10/15  
+#Country Lockdown: 2020/10/21 
+d %>%
+  filter(CountyName=="Donegal") %>%
+  group_by(TimeStamp) ->
+  donegal
+
+donegalplot <- ggplot(donegal, aes(x=TimeStamp, y=IncidenceRate))+
+  geom_line()+
+  geom_vline(xintercept = as.Date("2020/09/25"),
+             col = "magenta", lwd = 1)+
+    geom_vline(xintercept = as.Date("2020/10/15"),
+             col = "cyan", lwd = 1)+
+    geom_vline(xintercept = as.Date(c("2020/10/21", "2020/12/02")),
+             col = "blue", lwd = 1)+
+  xlab(NULL)+
+  ggtitle("Donegal")
+```
+
+```{r}
+#**Cavan**  
+#Level 4: 2020/10/15  
+#Country Lockdown: 2020/10/21  
+d %>%
+  filter(CountyName=="Cavan") %>%
+  group_by(TimeStamp) ->
+  cavan
+
+cavanplot <- ggplot(cavan, aes(x=TimeStamp, y=IncidenceRate))+
+  geom_line()+
+    geom_vline(xintercept = as.Date("2020/10/15"),
+             col = "cyan", lwd = 1)+
+    geom_vline(xintercept = as.Date(c("2020/10/21", "2020/12/02")),
+             col = "blue", lwd = 1)+
+  xlab(NULL)+
+  ggtitle("Cavan")
+```
+
+```{r}
+#**Monaghan**  
+#Level 4: 2020/10/15  
+#Country Lockdown: 2020/10/21  
+d %>%
+  filter(CountyName=="Monaghan") %>%
+  group_by(TimeStamp) ->
+  monaghan
+
+monaghanplot <- ggplot(monaghan, aes(x=TimeStamp, y=IncidenceRate))+
+  geom_line()+
+    geom_vline(xintercept = as.Date("2020/10/15"),
+             col = "cyan", lwd = 1)+
+    geom_vline(xintercept = as.Date(c("2020/10/21", "2020/12/02")),
+             col = "blue", lwd = 1)+
+  xlab(NULL)+
+  ggtitle("Monaghan")
+```
+
+
+
+
+```{r}
+#Kildare t.test
+d %>%
+  filter(CountyName=="Kildare") %>%
+  filter((TimeStamp >= as.Date("2020/08/07")-28) & TimeStamp <= as.Date("2020/08/07")) %>%
+  group_by(TimeStamp) ->
+  KEprelockdown
+
+d %>%
+  filter(CountyName=="Kildare") %>%
+  filter((TimeStamp >= as.Date("2020/08/07")) & TimeStamp <= as.Date("2020/08/07")+28) %>%
+  group_by(TimeStamp) ->
+  KEpostlockdown
+
+KE <- t.test(KEprelockdown$IncidenceRate,KEpostlockdown$IncidenceRate, alternative = 'less', paired=TRUE)
+KEttest <- c(KE$statistic, KE$p.value)
+```
+
+```{r}
+#Laois t.test
+d %>%
+  filter(CountyName=="Laois") %>%
+  filter((TimeStamp >= as.Date("2020/08/07")-28) & TimeStamp <= as.Date("2020/08/07")) %>%
+  group_by(TimeStamp) ->
+  LSprelockdown
+
+d %>%
+  filter(CountyName=="Laois") %>%
+  filter((TimeStamp >= as.Date("2020/08/07")) & TimeStamp <= as.Date("2020/08/07")+28) %>%
+  group_by(TimeStamp) ->
+  LSpostlockdown
+
+LS <- t.test(LSprelockdown$IncidenceRate,LSpostlockdown$IncidenceRate, alternative = 'less', paired=TRUE)
+LSttest <- c(LS$statistic, LS$p.value)
+```
+
+```{r}
+#Offaly t.test
+d %>%
+  filter(CountyName=="Offaly") %>%
+  filter((TimeStamp >= as.Date("2020/08/07")-28) & TimeStamp <= as.Date("2020/08/07")) %>%
+  group_by(TimeStamp) ->
+  OYprelockdown
+
+d %>%
+  filter(CountyName=="Offaly") %>%
+  filter((TimeStamp >= as.Date("2020/08/07")) & TimeStamp <= as.Date("2020/08/07")+28) %>%
+  group_by(TimeStamp) ->
+  OYpostlockdown
+
+OY <- t.test(OYprelockdown$IncidenceRate,OYpostlockdown$IncidenceRate, alternative = 'less', paired=TRUE)
+OYttest <- c(OY$statistic, OY$p.value)
+```
+
+```{r}
+midlandsttest <- data.frame(KEttest, LSttest, OYttest)
+colnames(midlandsttest) <- c("Kildare", "Laois", "Offaly")
+rownames(midlandsttest) <- c("t-stat", "p-value")
+```
+
+```{r}
+#Dublin: Level 3 t.test
+d %>%
+  filter(CountyName=="Dublin") %>%
+  filter((TimeStamp >= as.Date("2020/09/19")-28) & TimeStamp <= as.Date("2020/09/19")) %>%
+  group_by(TimeStamp) ->
+  D3prelockdown
+
+d %>%
+  filter(CountyName=="Dublin") %>%
+  filter((TimeStamp >= as.Date("2020/09/19")) & TimeStamp <= as.Date("2020/09/19")+28) %>%
+  group_by(TimeStamp) ->
+  D3postlockdown
+
+D3 <- t.test(D3prelockdown$IncidenceRate,D3postlockdown$IncidenceRate, alternative = 'less', paired=TRUE)
+D3ttest <- c(D3$statistic, D3$p.value)
+```
+
+```{r}
+dublinttest <- data.frame(D3ttest)
+colnames(dublinttest) <- c("Dublin L3")
+rownames(dublinttest) <- c("t-stat", "p-value")
+```
+
+```{r}
+#Donegal: Level 3 t.test
+d %>%
+  filter(CountyName=="Donegal") %>%
+  filter((TimeStamp >= as.Date("2020/09/25")-28) & TimeStamp <= as.Date("2020/09/25")) %>%
+  group_by(TimeStamp) ->
+  DL3prelockdown
+
+d %>%
+  filter(CountyName=="Donegal") %>%
+  filter((TimeStamp >= as.Date("2020/09/25")) & TimeStamp <= as.Date("2020/09/25")+28) %>%
+  group_by(TimeStamp) ->
+  DL3postlockdown
+
+DL3 <- t.test(DL3prelockdown$IncidenceRate,DL3postlockdown$IncidenceRate, alternative = 'less', paired=TRUE)
+DL3ttest <- c(DL3$statistic, DL3$p.value)
+```
+
+```{r}
+#Donegal: Level 4 t.test
+d %>%
+  filter(CountyName=="Donegal") %>%
+  filter((TimeStamp >= as.Date("2020/10/15")-28) & TimeStamp <= as.Date("2020/10/15")) %>%
+  group_by(TimeStamp) ->
+  DL4prelockdown
+
+d %>%
+  filter(CountyName=="Donegal") %>%
+  filter((TimeStamp >= as.Date("2020/10/15")) & TimeStamp <= as.Date("2020/10/15")+28) %>%
+  group_by(TimeStamp) ->
+  DL4postlockdown
+
+DL4 <- t.test(DL4prelockdown$IncidenceRate,DL4postlockdown$IncidenceRate, alternative = 'less', paired=TRUE)
+DL4ttest <- c(DL4$statistic, DL4$p.value)
+```
+
+```{r}
+#Cavan: Level 4 t.test
+d %>%
+  filter(CountyName=="Cavan") %>%
+  filter((TimeStamp >= as.Date("2020/10/21")-28) & TimeStamp <= as.Date("2020/10/21")) %>%
+  group_by(TimeStamp) ->
+  CN4prelockdown
+
+d %>%
+  filter(CountyName=="Cavan") %>%
+  filter((TimeStamp >= as.Date("2020/10/15")) & TimeStamp <= as.Date("2020/10/15")+28) %>%
+  group_by(TimeStamp) ->
+  CN4postlockdown
+
+CN4 <- t.test(CN4prelockdown$IncidenceRate,CN4postlockdown$IncidenceRate, alternative = 'less', paired=TRUE)
+CN4ttest <- c(CN4$statistic, CN4$p.value)
+```
+
+```{r}
+#Cavan: Level 5 Countrywide Lockdown t.test - 14 days
+d %>%
+  filter(CountyName=="Cavan") %>%
+  filter((TimeStamp >= as.Date("2020/10/21")-28) & TimeStamp <= as.Date("2020/10/21")) %>%
+  group_by(TimeStamp) ->
+  CN5prelockdown
+
+d %>%
+  filter(CountyName=="Cavan") %>%
+  filter((TimeStamp >= as.Date("2020/12/02")-28) & TimeStamp <= as.Date("2020/12/02")) %>%
+  group_by(TimeStamp) ->
+  CN5postlockdown
+
+CN5 <- t.test(CN5prelockdown$IncidenceRate,CN5postlockdown$IncidenceRate, alternative = 'less', paired=TRUE)
+CN5ttest <- c(CN5$statistic, CN5$p.value)
+```
+
+```{r}
+#Monaghan: Level 4 t.test
+d %>%
+  filter(CountyName=="Monaghan") %>%
+  filter((TimeStamp >= as.Date("2020/10/15")-28) & TimeStamp <= as.Date("2020/10/15")) %>%
+  group_by(TimeStamp) ->
+  MN4prelockdown
+
+d %>%
+  filter(CountyName=="Monaghan") %>%
+  filter((TimeStamp >= as.Date("2020/10/15")) & TimeStamp <= as.Date("2020/10/15")+28) %>%
+  group_by(TimeStamp) ->
+  MN4postlockdown
+
+MN4 <- t.test(MN4prelockdown$IncidenceRate,MN4postlockdown$IncidenceRate, alternative = 'less', paired=TRUE)
+MN4ttest <- c(MN4$statistic, MN4$p.value)
+```
+
+```{r}
+#Monaghan: Level 5 Countrywide Lockdown t.test
+d %>%
+  filter(CountyName=="Monaghan") %>%
+  filter((TimeStamp >= as.Date("2020/10/21")-28) & TimeStamp <= as.Date("2020/10/21")) %>%
+  group_by(TimeStamp) ->
+  MN5prelockdown
+
+d %>%
+  filter(CountyName=="Monaghan") %>%
+  filter((TimeStamp >= as.Date("2020/12/02")-28) & TimeStamp <= as.Date("2020/12/02")) %>%
+  group_by(TimeStamp) ->
+  MN5postlockdown
+
+MN5 <- t.test(MN5prelockdown$IncidenceRate,MN5postlockdown$IncidenceRate, alternative = 'less', paired=TRUE)
+MN5ttest <- c(MN5$statistic, MN5$p.value)
+```
+
+```{r}
+borderttest <- data.frame(DL3ttest, DL4ttest, CN4ttest, MN4ttest)
+colnames(borderttest) <- c("Donegal L3", "Donegal L4", "Cavan L4", "Monaghan L4")
+rownames(borderttest) <- c("t-stat", "p-value")
+```
+
+#### Midlands
+```{r,fig.width=12, fig.height=6}
+kildareplot + laoisplot + offalyplot + plot_layout(nrow = 3, ncol = 1)
+midlandsttest
+```
+
+#### Dublin
+```{r,fig.width=12, fig.height=2}
+dublinplot + plot_layout(nrow = 1, ncol = 1)
+dublinttest
+```
+
+#### Border Counties
+```{r,fig.width=12, fig.height=6}
+donegalplot + cavanplot + monaghanplot + plot_layout(nrow = 3, ncol = 1)
+borderttest
+```
